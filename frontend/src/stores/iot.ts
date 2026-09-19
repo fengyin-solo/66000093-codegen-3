@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import type { Device, Geofence, Alert, AlertType, AlertSeverity, DeviceGroup, DeviceThresholds, TrackData, TrackPoint, StayPoint, TrackSegment, HealthDataPoint, DeviceHealth, HealthSummary } from '../types';
+import type { Device, Geofence, Alert, AlertType, AlertSeverity, DeviceGroup, DeviceThresholds, TrackData, TrackPoint, StayPoint, TrackSegment, HealthDataPoint, DeviceHealth, HealthSummary, StatsPeriod, TeamDeviceStat, TeamGroupStat, TeamStatsOverview, TeamStatsResult } from '../types';
 
 function generateId(prefix: string) {
   return prefix + Date.now() + Math.random().toString(36).slice(2, 6);
@@ -8,11 +8,11 @@ function generateId(prefix: string) {
 
 export const useIotStore = defineStore('iot', () => {
   const devices = ref<Device[]>([
-    { id: 'd1', name: '传感器-A01', lat: 39.9042, lng: 116.4074, status: 'online', lastSeen: new Date().toISOString(), battery: 85, temperature: 24.5 },
-    { id: 'd2', name: '传感器-B02', lat: 39.9142, lng: 116.3974, status: 'alert', lastSeen: new Date().toISOString(), battery: 12, temperature: 38.2 },
-    { id: 'd3', name: '追踪器-C03', lat: 39.8942, lng: 116.4174, status: 'offline', lastSeen: new Date(Date.now() - 3600000).toISOString(), battery: 0, temperature: 0 },
-    { id: 'd4', name: '传感器-D04', lat: 39.9082, lng: 116.4024, status: 'online', lastSeen: new Date().toISOString(), battery: 45, temperature: 26.1 },
-    { id: 'd5', name: '追踪器-E05', lat: 39.8992, lng: 116.4104, status: 'online', lastSeen: new Date().toISOString(), battery: 92, temperature: 23.8 },
+    { id: 'd1', name: '传感器-A01', lat: 39.9042, lng: 116.4074, status: 'online', lastSeen: new Date().toISOString(), battery: 85, temperature: 24.5, groupId: 'g1' },
+    { id: 'd2', name: '传感器-B02', lat: 39.9142, lng: 116.3974, status: 'alert', lastSeen: new Date().toISOString(), battery: 12, temperature: 38.2, groupId: 'g1' },
+    { id: 'd3', name: '追踪器-C03', lat: 39.8942, lng: 116.4174, status: 'offline', lastSeen: new Date(Date.now() - 3600000).toISOString(), battery: 0, temperature: 0, groupId: 'g2' },
+    { id: 'd4', name: '传感器-D04', lat: 39.9082, lng: 116.4024, status: 'online', lastSeen: new Date().toISOString(), battery: 45, temperature: 26.1, groupId: 'g3' },
+    { id: 'd5', name: '追踪器-E05', lat: 39.8992, lng: 116.4104, status: 'online', lastSeen: new Date().toISOString(), battery: 92, temperature: 23.8, groupId: 'g4' },
   ]);
   const fences = ref<Geofence[]>([
     { id: 'f1', name: '办公区域', center: { lat: 39.9042, lng: 116.4074 }, radius: 500, type: 'circle', alertOnEnter: false, alertOnExit: true, color: '#4caf50' },
@@ -658,7 +658,7 @@ export const useIotStore = defineStore('iot', () => {
     return points;
   }
 
-  function calculateHealthScore(device: Device): number {
+  function calculateHealthScore(device: Device, alertSource?: Alert[]): number {
     let score = 100;
 
     if (device.status === 'offline') {
@@ -685,7 +685,8 @@ export const useIotStore = defineStore('iot', () => {
       score -= 5;
     }
 
-    const deviceAlerts = alerts.value.filter(a => a.deviceId === device.id && !a.acknowledged);
+    const source = alertSource ?? alerts.value;
+    const deviceAlerts = source.filter(a => a.deviceId === device.id && !a.acknowledged);
     if (deviceAlerts.length > 0) {
       const criticalCount = deviceAlerts.filter(a => a.severity === 'critical').length;
       const warningCount = deviceAlerts.filter(a => a.severity === 'warning').length;
@@ -857,6 +858,187 @@ export const useIotStore = defineStore('iot', () => {
     return deviceHealthList.value.find(h => h.deviceId === deviceId);
   }
 
+  // ===== 班组统计（日/周/月概览看板） =====
+  // 统计口径与健康诊断保持一致：评分复用 calculateHealthScore，
+  // 在线时长复用 calculateOnlineHours，趋势复用 calculateHealthTrend。
+  // 班组聚合与设备下钻均来自同一个 teamStatsResult，筛选变化后上下层同步。
+  const statsPeriod = ref<StatsPeriod>('day');
+  const statsRefreshToken = ref(0);
+
+  const STATS_PERIOD_HOURS: Record<StatsPeriod, number> = {
+    day: 24,
+    week: 24 * 7,
+    month: 24 * 30
+  };
+
+  function setStatsPeriod(period: StatsPeriod) {
+    statsPeriod.value = period;
+  }
+
+  function refreshTeamStats() {
+    statsRefreshToken.value += 1;
+  }
+
+  // 巡检耗时估算：按健康评分分档，离线设备需现场核查额外加时
+  function estimateInspectionMinutes(healthScore: number, status: Device['status']): number {
+    let minutes = healthScore >= 70 ? 10 : healthScore >= 40 ? 25 : 45;
+    if (status === 'offline') minutes += 10;
+    return minutes;
+  }
+
+  function emptyTeamStatsOverview(): TeamStatsOverview {
+    return {
+      deviceCount: 0,
+      groupCount: 0,
+      avgHealthScore: 0,
+      abnormalCount: 0,
+      avgOnlineRate: 0,
+      inspectionMinutes: 0,
+      avgScoreChange: 0,
+      improvingCount: 0,
+      stableCount: 0,
+      decliningCount: 0
+    };
+  }
+
+  const teamStatsResult = computed<TeamStatsResult>(() => {
+    statsRefreshToken.value;
+    const period = statsPeriod.value;
+
+    try {
+      if (devices.value.length === 0) {
+        return {
+          status: 'empty',
+          message: '尚未注册任何设备，无法生成班组统计。请先注册设备后重试。',
+          period,
+          overview: emptyTeamStatsOverview(),
+          groups: []
+        };
+      }
+
+      const periodHours = STATS_PERIOD_HOURS[period];
+      const periodMs = periodHours * 3600000;
+      const now = Date.now();
+      const currentWindowStart = now - periodMs;
+      const previousWindowStart = now - 2 * periodMs;
+
+      const deviceStats: TeamDeviceStat[] = devices.value.map((device) => {
+        // 生成两倍周期长度的健康记录，后半为本周期、前半为上一周期（用于趋势对照）
+        const history = generateHealthHistory(device, periodHours * 2);
+        const mid = Math.floor(history.length / 2);
+        const previousHistory = history.slice(0, mid);
+        const currentHistory = history.slice(mid);
+
+        if (currentHistory.length === 0 || previousHistory.length === 0) {
+          throw new Error(`设备「${device.name}」健康记录不足，统计计算失败`);
+        }
+
+        const healthScore = calculateHealthScore(device);
+        const healthTrend = calculateHealthTrend(currentHistory);
+        const { online, offline } = calculateOnlineHours(currentHistory);
+        const onlineRate = online + offline > 0 ? Math.round((online / (online + offline)) * 100) : 0;
+
+        const windowAlerts = (start: number, end: number) => alerts.value.filter(a => {
+          const t = new Date(a.timestamp).getTime();
+          return a.deviceId === device.id && !a.acknowledged && t >= start && t < end;
+        });
+
+        // 用同一套评分规则对周期内平均指标打分，得出环比变化
+        const periodScore = (hist: HealthDataPoint[], winAlerts: Alert[]) => {
+          const avgBattery = hist.reduce((sum, p) => sum + p.battery, 0) / hist.length;
+          const avgTemp = hist.reduce((sum, p) => sum + p.temperature, 0) / hist.length;
+          const onlineRatio = hist.filter(p => p.isOnline).length / hist.length;
+          const snapshot: Device = {
+            ...device,
+            battery: Math.round(avgBattery),
+            temperature: Math.round(avgTemp * 10) / 10,
+            status: onlineRatio < 0.5 ? 'offline' : device.status
+          };
+          return calculateHealthScore(snapshot, winAlerts);
+        };
+
+        const currentPeriodScore = periodScore(currentHistory, windowAlerts(currentWindowStart, now));
+        const previousPeriodScore = periodScore(previousHistory, windowAlerts(previousWindowStart, currentWindowStart));
+
+        const alertCount = windowAlerts(currentWindowStart, now).length;
+
+        return {
+          deviceId: device.id,
+          deviceName: device.name,
+          groupId: device.groupId,
+          status: device.status,
+          healthScore,
+          healthTrend,
+          scoreChange: currentPeriodScore - previousPeriodScore,
+          onlineRate,
+          onlineHours: online,
+          offlineHours: offline,
+          alertCount,
+          inspectionMinutes: estimateInspectionMinutes(healthScore, device.status),
+          isAbnormal: healthScore < 70 || alertCount > 0
+        };
+      });
+
+      const aggregate = (members: TeamDeviceStat[]) => {
+        const count = members.length;
+        return {
+          deviceCount: count,
+          avgHealthScore: Math.round(members.reduce((sum, d) => sum + d.healthScore, 0) / count),
+          abnormalCount: members.filter(d => d.isAbnormal).length,
+          avgOnlineRate: Math.round(members.reduce((sum, d) => sum + d.onlineRate, 0) / count),
+          inspectionMinutes: members.reduce((sum, d) => sum + d.inspectionMinutes, 0),
+          improvingCount: members.filter(d => d.healthTrend === 'improving').length,
+          stableCount: members.filter(d => d.healthTrend === 'stable').length,
+          decliningCount: members.filter(d => d.healthTrend === 'declining').length,
+          avgScoreChange: Math.round((members.reduce((sum, d) => sum + d.scoreChange, 0) / count) * 10) / 10
+        };
+      };
+
+      const groupStats: TeamGroupStat[] = [];
+      groups.value.forEach(g => {
+        const members = deviceStats
+          .filter(d => d.groupId === g.id)
+          .sort((a, b) => a.healthScore - b.healthScore);
+        if (members.length === 0) return;
+        groupStats.push({ groupId: g.id, groupName: g.name, color: g.color, ...aggregate(members), devices: members });
+      });
+
+      const ungrouped = deviceStats
+        .filter(d => !d.groupId || !groups.value.some(g => g.id === d.groupId))
+        .sort((a, b) => a.healthScore - b.healthScore);
+      if (ungrouped.length > 0) {
+        groupStats.push({ groupId: 'ungrouped', groupName: '未分组', color: '#9e9e9e', ...aggregate(ungrouped), devices: ungrouped });
+      }
+
+      if (groupStats.length === 0) {
+        return {
+          status: 'empty',
+          message: '设备缺少可用的健康记录，暂时无法生成班组统计。',
+          period,
+          overview: emptyTeamStatsOverview(),
+          groups: []
+        };
+      }
+
+      groupStats.sort((a, b) => a.avgHealthScore - b.avgHealthScore);
+
+      const overview: TeamStatsOverview = {
+        ...aggregate(deviceStats),
+        groupCount: groupStats.length
+      };
+
+      return { status: 'ok', period, overview, groups: groupStats };
+    } catch (err) {
+      return {
+        status: 'error',
+        message: err instanceof Error ? err.message : '统计计算过程中发生未知错误',
+        period,
+        overview: emptyTeamStatsOverview(),
+        groups: []
+      };
+    }
+  });
+
   return {
     devices, fences, alerts, selectedFenceId, editMode, highlightedDeviceId,
     isRegisteringDevice, registrationLocation, groups,
@@ -869,6 +1051,7 @@ export const useIotStore = defineStore('iot', () => {
     isPlaying, playbackSpeed, showTrack, showStayPoints, showBreachEvents,
     playbackCurrentPoint, playbackProgress, playbackCurrentTime,
     deviceHealthList, priorityInspectionList, healthSummary, recentAbnormalRecords,
+    statsPeriod, teamStatsResult,
     getDeviceById, getFenceById, getGroupById, getDeviceHealth,
     acknowledgeAlert, batchAcknowledgeAlerts, acknowledgeAllAlerts,
     setHighlightedDevice, addAlert, generateMockAlert,
@@ -880,6 +1063,7 @@ export const useIotStore = defineStore('iot', () => {
     jumpToStayPoint, jumpToBreachEvent,
     enableTrackPlayback, disableTrackPlayback,
     toggleTrackVisibility, toggleStayPointsVisibility, toggleBreachEventsVisibility,
-    formatDuration, formatDistance
+    formatDuration, formatDistance,
+    setStatsPeriod, refreshTeamStats
   };
 });

@@ -130,3 +130,58 @@ export interface HealthSummary {
   mediumPriorityCount: number;
   lowPriorityCount: number;
 }
+
+export type StatsPeriod = 'day' | 'week' | 'month';
+
+export interface TeamDeviceStat {
+  deviceId: string;
+  deviceName: string;
+  groupId?: string;
+  status: Device['status'];
+  healthScore: number;
+  healthTrend: 'improving' | 'stable' | 'declining';
+  scoreChange: number;
+  onlineRate: number;
+  onlineHours: number;
+  offlineHours: number;
+  alertCount: number;
+  inspectionMinutes: number;
+  isAbnormal: boolean;
+}
+
+export interface TeamGroupStat {
+  groupId: string;
+  groupName: string;
+  color: string;
+  deviceCount: number;
+  avgHealthScore: number;
+  abnormalCount: number;
+  avgOnlineRate: number;
+  inspectionMinutes: number;
+  improvingCount: number;
+  stableCount: number;
+  decliningCount: number;
+  avgScoreChange: number;
+  devices: TeamDeviceStat[];
+}
+
+export interface TeamStatsOverview {
+  deviceCount: number;
+  groupCount: number;
+  avgHealthScore: number;
+  abnormalCount: number;
+  avgOnlineRate: number;
+  inspectionMinutes: number;
+  avgScoreChange: number;
+  improvingCount: number;
+  stableCount: number;
+  decliningCount: number;
+}
+
+export interface TeamStatsResult {
+  status: 'ok' | 'empty' | 'error';
+  message?: string;
+  period: StatsPeriod;
+  overview: TeamStatsOverview;
+  groups: TeamGroupStat[];
+}

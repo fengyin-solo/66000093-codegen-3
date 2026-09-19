@@ -54,6 +54,14 @@
         title="健康诊断">
         🏥
       </button>
+      <button @click="handlePanelClick('stats')"
+        :style="{ width:'44px', height:'44px', borderRadius:'8px', border:'none', cursor:'pointer',
+          background: activePanel === 'stats' ? '#fff' : 'transparent',
+          color: activePanel === 'stats' ? '#1b5e20' : '#fff',
+          fontSize:'18px', display:'flex', alignItems:'center', justifyContent:'center' }"
+        title="班组统计">
+        👥
+      </button>
       <hr style="width:36px;border-color:rgba(255,255,255,0.2);margin:8px 0"/>
       <button @click="handleAddDevice"
         :style="{ width:'44px', height:'44px', borderRadius:'8px', border:'none', cursor:'pointer',
@@ -79,6 +87,7 @@
     <AlarmCenter v-if="activePanel === 'alarms' && !store.isRegisteringDevice" />
     <TrackPlayer v-if="activePanel === 'track' && !store.isRegisteringDevice" @close="handleTrackClose" />
     <DeviceHealthDiagnosis v-if="activePanel === 'health' && !store.isRegisteringDevice" />
+    <TeamStatsBoard v-if="activePanel === 'stats' && !store.isRegisteringDevice" />
   </div>
 </template>
 
@@ -92,13 +101,14 @@ import DeviceRegistration from './components/DeviceRegistration.vue';
 import TrackPlayer from './components/TrackPlayer.vue';
 import MonitorDashboard from './components/MonitorDashboard.vue';
 import DeviceHealthDiagnosis from './components/DeviceHealthDiagnosis.vue';
+import TeamStatsBoard from './components/TeamStatsBoard.vue';
 import { useIotStore } from './stores/iot';
 
 const store = useIotStore();
-const activePanel = ref<'devices' | 'fences' | 'alarms' | 'track' | 'health'>('alarms');
+const activePanel = ref<'devices' | 'fences' | 'alarms' | 'track' | 'health' | 'stats'>('alarms');
 const isDashboardMode = ref(false);
 
-function handlePanelClick(panel: 'devices' | 'fences' | 'alarms' | 'track' | 'health') {
+function handlePanelClick(panel: 'devices' | 'fences' | 'alarms' | 'track' | 'health' | 'stats') {
   if (activePanel.value === 'track' && panel !== 'track') {
     store.disableTrackPlayback();
   }
