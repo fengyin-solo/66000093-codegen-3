@@ -288,6 +288,10 @@ import type { DeviceHealth, AlertType, AlertSeverity, Alert, HealthDataPoint } f
 
 const store = useIotStore();
 
+const props = defineProps<{
+  focusDeviceId?: string | null;
+}>();
+
 const activeTab = ref<'overview' | 'priority' | 'records'>('priority');
 const selectedDevice = ref<DeviceHealth | null>(null);
 const batteryChartRef = ref<HTMLElement | null>(null);
@@ -568,6 +572,18 @@ watch(selectedDevice, () => {
     renderCharts();
   });
 });
+
+// 来自班组统计视图的下钻：聚焦到指定设备并展示趋势
+watch(() => props.focusDeviceId, (id) => {
+  if (!id) return;
+  const health = store.getDeviceHealth(id);
+  if (health) {
+    selectedDevice.value = health;
+    activeTab.value = 'overview';
+    store.setHighlightedDevice(id);
+    nextTick(() => renderCharts());
+  }
+}, { immediate: true });
 
 watch(activeTab, (newTab) => {
   if (newTab === 'overview') {

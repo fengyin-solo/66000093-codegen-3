@@ -54,6 +54,14 @@
         title="健康诊断">
         🏥
       </button>
+      <button @click="handlePanelClick('stats')"
+        :style="{ width:'44px', height:'44px', borderRadius:'8px', border:'none', cursor:'pointer',
+          background: activePanel === 'stats' ? '#fff' : 'transparent',
+          color: activePanel === 'stats' ? '#1b5e20' : '#fff',
+          fontSize:'18px', display:'flex', alignItems:'center', justifyContent:'center' }"
+        title="班组统计">
+        👥
+      </button>
       <hr style="width:36px;border-color:rgba(255,255,255,0.2);margin:8px 0"/>
       <button @click="handleAddDevice"
         :style="{ width:'44px', height:'44px', borderRadius:'8px', border:'none', cursor:'pointer',
@@ -78,7 +86,8 @@
     <FenceEditor v-if="activePanel === 'fences' && !store.isRegisteringDevice" />
     <AlarmCenter v-if="activePanel === 'alarms' && !store.isRegisteringDevice" />
     <TrackPlayer v-if="activePanel === 'track' && !store.isRegisteringDevice" @close="handleTrackClose" />
-    <DeviceHealthDiagnosis v-if="activePanel === 'health' && !store.isRegisteringDevice" />
+    <DeviceHealthDiagnosis v-if="activePanel === 'health' && !store.isRegisteringDevice" :focus-device-id="healthFocusDeviceId" />
+    <TeamStatistics v-if="activePanel === 'stats' && !store.isRegisteringDevice" @open-health="handleOpenHealth" />
   </div>
 </template>
 
@@ -92,18 +101,23 @@ import DeviceRegistration from './components/DeviceRegistration.vue';
 import TrackPlayer from './components/TrackPlayer.vue';
 import MonitorDashboard from './components/MonitorDashboard.vue';
 import DeviceHealthDiagnosis from './components/DeviceHealthDiagnosis.vue';
+import TeamStatistics from './components/TeamStatistics.vue';
 import { useIotStore } from './stores/iot';
 
 const store = useIotStore();
-const activePanel = ref<'devices' | 'fences' | 'alarms' | 'track' | 'health'>('alarms');
+const activePanel = ref<'devices' | 'fences' | 'alarms' | 'track' | 'health' | 'stats'>('alarms');
 const isDashboardMode = ref(false);
+const healthFocusDeviceId = ref<string | null>(null);
 
-function handlePanelClick(panel: 'devices' | 'fences' | 'alarms' | 'track' | 'health') {
+function handlePanelClick(panel: 'devices' | 'fences' | 'alarms' | 'track' | 'health' | 'stats') {
   if (activePanel.value === 'track' && panel !== 'track') {
     store.disableTrackPlayback();
   }
   if (panel === 'track') {
     store.enableTrackPlayback();
+  }
+  if (panel !== 'health') {
+    healthFocusDeviceId.value = null;
   }
   activePanel.value = panel;
 }
@@ -123,6 +137,11 @@ function handleRegistrationCancel() {
 
 function handleTrackClose() {
   activePanel.value = 'devices';
+}
+
+function handleOpenHealth(deviceId: string) {
+  healthFocusDeviceId.value = deviceId;
+  activePanel.value = 'health';
 }
 
 function enterDashboard() {

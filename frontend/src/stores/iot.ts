@@ -1,18 +1,26 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import type { Device, Geofence, Alert, AlertType, AlertSeverity, DeviceGroup, DeviceThresholds, TrackData, TrackPoint, StayPoint, TrackSegment, HealthDataPoint, DeviceHealth, HealthSummary } from '../types';
+import type { Device, Geofence, Alert, AlertType, AlertSeverity, DeviceGroup, DeviceThresholds, TrackData, TrackPoint, StayPoint, TrackSegment, HealthDataPoint, DeviceHealth, HealthSummary, StatsPeriod, DevicePeriodStat, GroupStatistic, StatsOverview } from '../types';
 
 function generateId(prefix: string) {
   return prefix + Date.now() + Math.random().toString(36).slice(2, 6);
 }
 
+const GROUP_FILTER_ALL = '__all__';
+const UNGROUPED_FILTER = '__none__';
+
+export const statsGroupFilters = {
+  ALL: GROUP_FILTER_ALL,
+  UNGROUPED: UNGROUPED_FILTER,
+};
+
 export const useIotStore = defineStore('iot', () => {
   const devices = ref<Device[]>([
-    { id: 'd1', name: '传感器-A01', lat: 39.9042, lng: 116.4074, status: 'online', lastSeen: new Date().toISOString(), battery: 85, temperature: 24.5 },
-    { id: 'd2', name: '传感器-B02', lat: 39.9142, lng: 116.3974, status: 'alert', lastSeen: new Date().toISOString(), battery: 12, temperature: 38.2 },
-    { id: 'd3', name: '追踪器-C03', lat: 39.8942, lng: 116.4174, status: 'offline', lastSeen: new Date(Date.now() - 3600000).toISOString(), battery: 0, temperature: 0 },
-    { id: 'd4', name: '传感器-D04', lat: 39.9082, lng: 116.4024, status: 'online', lastSeen: new Date().toISOString(), battery: 45, temperature: 26.1 },
-    { id: 'd5', name: '追踪器-E05', lat: 39.8992, lng: 116.4104, status: 'online', lastSeen: new Date().toISOString(), battery: 92, temperature: 23.8 },
+    { id: 'd1', name: '传感器-A01', lat: 39.9042, lng: 116.4074, status: 'online', lastSeen: new Date().toISOString(), battery: 85, temperature: 24.5, groupId: 'g3' },
+    { id: 'd2', name: '传感器-B02', lat: 39.9142, lng: 116.3974, status: 'alert', lastSeen: new Date().toISOString(), battery: 12, temperature: 38.2, groupId: 'g1' },
+    { id: 'd3', name: '追踪器-C03', lat: 39.8942, lng: 116.4174, status: 'offline', lastSeen: new Date(Date.now() - 3600000).toISOString(), battery: 0, temperature: 0, groupId: 'g4' },
+    { id: 'd4', name: '传感器-D04', lat: 39.9082, lng: 116.4024, status: 'online', lastSeen: new Date().toISOString(), battery: 45, temperature: 26.1, groupId: 'g1' },
+    { id: 'd5', name: '追踪器-E05', lat: 39.8992, lng: 116.4104, status: 'online', lastSeen: new Date().toISOString(), battery: 92, temperature: 23.8, groupId: 'g2' },
   ]);
   const fences = ref<Geofence[]>([
     { id: 'f1', name: '办公区域', center: { lat: 39.9042, lng: 116.4074 }, radius: 500, type: 'circle', alertOnEnter: false, alertOnExit: true, color: '#4caf50' },
@@ -857,6 +865,331 @@ export const useIotStore = defineStore('iot', () => {
     return deviceHealthList.value.find(h => h.deviceId === deviceId);
   }
 
+  // ===== 班组统计引擎：班组视图与设备详情下钻共用同一口径 =====
+
+  const statsPeriod = ref<StatsPeriod>('day');
+  const statsGroupFilter = ref<string>(GROUP_FILTER_ALL);
+  const statsLoading = ref(false);
+  const statsError = ref<string | null>(null);
+  const statsUpdatedAt = ref<string>('');
+  const devicePeriodStats = ref<DevicePeriodStat[]>([]);
+  let statsLoadToken = 0;
+
+  const PERIOD_MS: Record<StatsPeriod, number> = {
+    day: 24 * 3600 * 1000,
+    week: 7 * 24 * 3600 * 1000,
+    month: 30 * 24 * 3600 * 1000,
+  };
+
+  function hashSeed(input: string): number {
+    let h = 2166136261;
+    for (let i = 0; i < input.length; i++) {
+      h ^= input.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return h >>> 0;
+  }
+
+  function mulberry32(seed: number): () => number {
+    let a = seed;
+    return () => {
+      a |= 0;
+      a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  interface PeriodSample {
+    time: number;
+    online: boolean;
+    score: number;
+    battery: number;
+    temperature: number;
+  }
+
+  function periodRange(period: StatsPeriod, end: number) {
+    const span = PERIOD_MS[period];
+    return { start: end - span, end, span };
+  }
+
+  // 与 calculateHealthScore 完全一致的扣分口径（作用于单个采样点）
+  function scoreAtSample(device: Device, battery: number, temperature: number, time: number): number {
+    let score = 100;
+
+    if (device.status === 'offline') {
+      score -= 50;
+    } else if (device.status === 'alert') {
+      score -= 25;
+    }
+
+    if (battery < 10) {
+      score -= 30;
+    } else if (battery < 20) {
+      score -= 20;
+    } else if (battery < 30) {
+      score -= 10;
+    } else if (battery < 50) {
+      score -= 5;
+    }
+
+    if (temperature > 45) {
+      score -= 25;
+    } else if (temperature > 38) {
+      score -= 15;
+    } else if (temperature > 35) {
+      score -= 5;
+    }
+
+    const periodAlerts = alerts.value.filter(a => a.deviceId === device.id && !a.acknowledged && new Date(a.timestamp).getTime() <= time);
+    if (periodAlerts.length > 0) {
+      const crit = periodAlerts.filter(a => a.severity === 'critical').length;
+      const warn = periodAlerts.filter(a => a.severity === 'warning').length;
+      score -= crit * 15 + warn * 5;
+    }
+
+    return Math.max(0, Math.min(100, score));
+  }
+
+  function buildPeriodSamples(device: Device, period: StatsPeriod, windowEnd: number): PeriodSample[] {
+    const { start, end } = periodRange(period, windowEnd);
+    const span = end - start;
+    // 日：30 分钟；周：约 1 小时；月：约 4 小时
+    const step = Math.max(30 * 60 * 1000, Math.round(span / 48 / (30 * 60 * 1000)) * 30 * 60 * 1000);
+    const rng = mulberry32(hashSeed(device.id + ':' + period + ':' + Math.floor(windowEnd / span)));
+
+    const lastSeenMs = new Date(device.lastSeen).getTime();
+    let battery = Math.max(0, Math.min(100, device.battery));
+    let temperature = device.temperature > 0 ? device.temperature : 25;
+    const samples: PeriodSample[] = [];
+
+    for (let time = start; time <= end; time += step) {
+      battery = Math.max(0, Math.min(100, battery + (rng() - 0.6) * 2));
+      temperature = Math.max(0, Math.min(60, temperature + (rng() - 0.5) * 3));
+
+      let online = true;
+      if (device.status === 'offline') {
+        online = time < lastSeenMs;
+      } else {
+        online = rng() > 0.05;
+      }
+
+      if (!online) {
+        samples.push({ time, online: false, score: Math.max(0, scoreAtSample(device, battery, temperature, time) - 30), battery: 0, temperature: 0 });
+      } else {
+        samples.push({ time, online: true, score: scoreAtSample(device, battery, temperature, time), battery, temperature });
+      }
+    }
+
+    return samples;
+  }
+
+  function trendFromDelta(delta: number): DevicePeriodStat['healthTrend'] {
+    if (delta > 2) return 'improving';
+    if (delta < -2) return 'declining';
+    return 'stable';
+  }
+
+  function downsample(values: number[], target: number): number[] {
+    if (values.length <= target) return values;
+    const out: number[] = [];
+    for (let i = 0; i < target; i++) {
+      const idx = Math.round((i / (target - 1)) * (values.length - 1));
+      out.push(values[idx]);
+    }
+    return out;
+  }
+
+  function buildDevicePeriodStat(device: Device, period: StatsPeriod, now: number): DevicePeriodStat {
+    const span = PERIOD_MS[period];
+    const currentSamples = buildPeriodSamples(device, period, now);
+    const prevSamples = buildPeriodSamples(device, period, now - span);
+
+    const avg = (arr: number[]) => (arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : 0);
+    const round1 = (v: number) => Math.round(v * 10) / 10;
+
+    const onlineSamples = currentSamples.filter(s => s.online);
+    const prevOnlineSamples = prevSamples.filter(s => s.online);
+    const healthScore = Math.round(avg(currentSamples.map(s => s.score)));
+    const prevHealthScore = Math.round(avg(prevSamples.map(s => s.score)));
+
+    const onlineRate = Math.round((onlineSamples.length / Math.max(1, currentSamples.length)) * 100);
+    const prevOnlineRate = Math.round((prevOnlineSamples.length / Math.max(1, prevSamples.length)) * 100);
+
+    const { start, end } = periodRange(period, now);
+    const prevRange = periodRange(period, now - span);
+    const inWindow = (a: Alert, s: number, e: number) => {
+      const t = new Date(a.timestamp).getTime();
+      return t >= s && t < e;
+    };
+    const deviceAlerts = alerts.value.filter(a => a.deviceId === device.id);
+    const periodAlerts = deviceAlerts.filter(a => inWindow(a, start, end));
+    const prevPeriodAlerts = deviceAlerts.filter(a => inWindow(a, prevRange.start, prevRange.end));
+
+    const lowSamples = onlineSamples.filter(s => s.battery < 20).length;
+    const hotSamples = onlineSamples.filter(s => s.temperature > 38).length;
+    const prevLowSamples = prevOnlineSamples.filter(s => s.battery < 20).length;
+    const prevHotSamples = prevOnlineSamples.filter(s => s.temperature > 38).length;
+
+    // 巡检耗时口径：严重 20 分钟/条、警告 8 分钟/条，低电量或高温采样点各 3 分钟，封顶 600 分钟
+    const inspectionMinutes = Math.min(600,
+      periodAlerts.filter(a => a.severity === 'critical').length * 20 +
+      periodAlerts.filter(a => a.severity !== 'critical').length * 8 +
+      (lowSamples + hotSamples) * 3);
+    const prevInspectionMinutes = Math.min(600,
+      prevPeriodAlerts.filter(a => a.severity === 'critical').length * 20 +
+      prevPeriodAlerts.filter(a => a.severity !== 'critical').length * 8 +
+      (prevLowSamples + prevHotSamples) * 3);
+
+    const latestAlert = deviceAlerts
+      .filter(a => inWindow(a, start, end))
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
+
+    return {
+      deviceId: device.id,
+      deviceName: device.name,
+      groupId: device.groupId,
+      healthScore,
+      prevHealthScore,
+      scoreDelta: healthScore - prevHealthScore,
+      healthTrend: trendFromDelta(healthScore - prevHealthScore),
+      onlineRate,
+      prevOnlineRate,
+      abnormalCount: periodAlerts.length,
+      prevAbnormalCount: prevPeriodAlerts.length,
+      isAbnormal: device.status === 'alert' || device.status === 'offline' || periodAlerts.length > 0,
+      inspectionMinutes,
+      prevInspectionMinutes,
+      avgBattery: Math.round(avg(onlineSamples.map(s => s.battery))),
+      avgTemperature: round1(avg(onlineSamples.map(s => s.temperature))),
+      scoreSeries: downsample(currentSamples.map(s => s.score), 24),
+      lastAlertTime: latestAlert?.timestamp,
+    };
+  }
+
+  const filteredDeviceStats = computed<DevicePeriodStat[]>(() => {
+    if (statsGroupFilter.value === GROUP_FILTER_ALL) return devicePeriodStats.value;
+    return devicePeriodStats.value.filter(s =>
+      statsGroupFilter.value === UNGROUPED_FILTER ? !s.groupId : s.groupId === statsGroupFilter.value
+    );
+  });
+
+  const groupStatistics = computed<GroupStatistic[]>(() => {
+    const buckets = new Map<string | null, DevicePeriodStat[]>();
+    filteredDeviceStats.value.forEach(s => {
+      const key = s.groupId ?? null;
+      const list = buckets.get(key) || [];
+      list.push(s);
+      buckets.set(key, list);
+    });
+
+    const stats: GroupStatistic[] = [];
+    groups.value.forEach(g => {
+      if (statsGroupFilter.value !== GROUP_FILTER_ALL && statsGroupFilter.value !== g.id) return;
+      const list = buckets.get(g.id) || [];
+      stats.push(aggregateGroup(g.id, g.name, g.color, list));
+    });
+    if (statsGroupFilter.value === GROUP_FILTER_ALL || statsGroupFilter.value === UNGROUPED_FILTER) {
+      const list = buckets.get(null) || [];
+      if (list.length > 0) {
+        stats.push(aggregateGroup(null, '未分组设备', '#757575', list));
+      }
+    }
+    return stats.sort((a, b) => a.avgHealthScore - b.avgHealthScore || b.abnormalDeviceCount - a.abnormalDeviceCount);
+  });
+
+  function aggregateGroup(groupId: string | null, groupName: string, groupColor: string, list: DevicePeriodStat[]): GroupStatistic {
+    const avg = (arr: number[]) => (arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : 0);
+    const deviceCount = list.length;
+    const avgHealthScore = Math.round(avg(list.map(d => d.healthScore)));
+    const prevAvgHealthScore = Math.round(avg(list.map(d => d.prevHealthScore)));
+    const onlineRate = Math.round(avg(list.map(d => d.onlineRate)));
+    const prevOnlineRate = Math.round(avg(list.map(d => d.prevOnlineRate)));
+    return {
+      groupId,
+      groupName,
+      groupColor,
+      deviceCount,
+      avgHealthScore,
+      prevAvgHealthScore,
+      healthDelta: deviceCount ? avgHealthScore - prevAvgHealthScore : 0,
+      abnormalDeviceCount: list.filter(d => d.isAbnormal).length,
+      onlineRate,
+      prevOnlineRate,
+      onlineRateDelta: deviceCount ? onlineRate - prevOnlineRate : 0,
+      totalInspectionMinutes: list.reduce((s, d) => s + d.inspectionMinutes, 0),
+      prevInspectionMinutes: list.reduce((s, d) => s + d.prevInspectionMinutes, 0),
+      totalAlerts: list.reduce((s, d) => s + d.abnormalCount, 0),
+      improvingCount: list.filter(d => d.healthTrend === 'improving').length,
+      stableCount: list.filter(d => d.healthTrend === 'stable').length,
+      decliningCount: list.filter(d => d.healthTrend === 'declining').length,
+      deviceStats: [...list].sort((a, b) => a.healthScore - b.healthScore),
+    };
+  }
+
+  const statsOverview = computed<StatsOverview>(() => {
+    const list = filteredDeviceStats.value;
+    const avg = (arr: number[]) => (arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : 0);
+    return {
+      deviceCount: list.length,
+      abnormalDeviceCount: list.filter(d => d.isAbnormal).length,
+      avgHealthScore: Math.round(avg(list.map(d => d.healthScore))),
+      prevAvgHealthScore: Math.round(avg(list.map(d => d.prevHealthScore))),
+      avgOnlineRate: Math.round(avg(list.map(d => d.onlineRate))),
+      prevAvgOnlineRate: Math.round(avg(list.map(d => d.prevOnlineRate))),
+      totalInspectionMinutes: list.reduce((s, d) => s + d.inspectionMinutes, 0),
+      prevTotalInspectionMinutes: list.reduce((s, d) => s + d.prevInspectionMinutes, 0),
+      totalAlerts: list.reduce((s, d) => s + d.abnormalCount, 0),
+      prevTotalAlerts: list.reduce((s, d) => s + d.prevAbnormalCount, 0),
+    };
+  });
+
+  async function refreshStatistics(period: StatsPeriod = statsPeriod.value) {
+    const token = ++statsLoadToken;
+    statsLoading.value = true;
+    statsError.value = null;
+
+    await new Promise(resolve => setTimeout(resolve, 250));
+
+    try {
+      if (devices.value.length === 0) {
+        throw new Error('暂无设备数据');
+      }
+      const now = Date.now();
+      const result = devices.value.map(d => {
+        // 单台计算失败不应拖垮整页，但需显式抛出以便外层统一兜底
+        if (!d || !d.id) throw new Error('设备数据不完整');
+        return buildDevicePeriodStat(d, period, now);
+      });
+      if (token !== statsLoadToken) return;
+      devicePeriodStats.value = result;
+      statsUpdatedAt.value = new Date(now).toISOString();
+      statsError.value = null;
+    } catch (err) {
+      if (token !== statsLoadToken) return;
+      devicePeriodStats.value = [];
+      statsError.value = err instanceof Error ? err.message : '统计计算失败，请重试';
+    } finally {
+      if (token === statsLoadToken) {
+        statsLoading.value = false;
+      }
+    }
+  }
+
+  function setStatsPeriod(period: StatsPeriod) {
+    statsPeriod.value = period;
+    refreshStatistics(period);
+  }
+
+  function setStatsGroupFilter(filter: string) {
+    statsGroupFilter.value = filter;
+  }
+
+  function getDevicePeriodStat(deviceId: string): DevicePeriodStat | undefined {
+    return devicePeriodStats.value.find(s => s.deviceId === deviceId);
+  }
+
   return {
     devices, fences, alerts, selectedFenceId, editMode, highlightedDeviceId,
     isRegisteringDevice, registrationLocation, groups,
@@ -869,6 +1202,9 @@ export const useIotStore = defineStore('iot', () => {
     isPlaying, playbackSpeed, showTrack, showStayPoints, showBreachEvents,
     playbackCurrentPoint, playbackProgress, playbackCurrentTime,
     deviceHealthList, priorityInspectionList, healthSummary, recentAbnormalRecords,
+    statsPeriod, statsGroupFilter, statsLoading, statsError, statsUpdatedAt,
+    devicePeriodStats, filteredDeviceStats, groupStatistics, statsOverview,
+    refreshStatistics, setStatsPeriod, setStatsGroupFilter, getDevicePeriodStat,
     getDeviceById, getFenceById, getGroupById, getDeviceHealth,
     acknowledgeAlert, batchAcknowledgeAlerts, acknowledgeAllAlerts,
     setHighlightedDevice, addAlert, generateMockAlert,

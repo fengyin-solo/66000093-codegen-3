@@ -130,3 +130,60 @@ export interface HealthSummary {
   mediumPriorityCount: number;
   lowPriorityCount: number;
 }
+
+export type StatsPeriod = 'day' | 'week' | 'month';
+
+export interface DevicePeriodStat {
+  deviceId: string;
+  deviceName: string;
+  groupId?: string;
+  healthScore: number;
+  prevHealthScore: number;
+  scoreDelta: number;
+  healthTrend: 'improving' | 'stable' | 'declining';
+  onlineRate: number;
+  prevOnlineRate: number;
+  abnormalCount: number;
+  prevAbnormalCount: number;
+  isAbnormal: boolean;
+  inspectionMinutes: number;
+  prevInspectionMinutes: number;
+  avgBattery: number;
+  avgTemperature: number;
+  scoreSeries: number[];
+  lastAlertTime?: string;
+}
+
+export interface GroupStatistic {
+  groupId: string | null;
+  groupName: string;
+  groupColor: string;
+  deviceCount: number;
+  avgHealthScore: number;
+  prevAvgHealthScore: number;
+  healthDelta: number;
+  abnormalDeviceCount: number;
+  onlineRate: number;
+  prevOnlineRate: number;
+  onlineRateDelta: number;
+  totalInspectionMinutes: number;
+  prevInspectionMinutes: number;
+  totalAlerts: number;
+  improvingCount: number;
+  stableCount: number;
+  decliningCount: number;
+  deviceStats: DevicePeriodStat[];
+}
+
+export interface StatsOverview {
+  deviceCount: number;
+  abnormalDeviceCount: number;
+  avgHealthScore: number;
+  prevAvgHealthScore: number;
+  avgOnlineRate: number;
+  prevAvgOnlineRate: number;
+  totalInspectionMinutes: number;
+  prevTotalInspectionMinutes: number;
+  totalAlerts: number;
+  prevTotalAlerts: number;
+}
